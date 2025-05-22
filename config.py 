@@ -1,0 +1,10 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # Load from .env file
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # None if missing
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+
+if not TOKEN:
+    raise ValueError("❌ Missing TELEGRAM_BOT_TOKEN in .env file!")
