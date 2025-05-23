@@ -1,5 +1,5 @@
 .env
 __pycache__/
-*.db
 *.pyc
+*.db
 venv/
