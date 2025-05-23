@@ -1,5 +1,21 @@
-.env
+# Python
 __pycache__/
 *.pyc
-*.db
-venv/
+*.pyo
+*.pyd
+.Python
+env/
+venv/ # This is the important line for your current issue
+.ipynb_checkpoints/
+.mypy_cache/
+.pytest_cache/
+.vscode/ # If you don't want to track VS Code settings
+.idea/ # If you're using PyCharm
+
+# Logs and Databases
+*.log
+*.db # This will ignore your employee_tracker.db, which is good for Git but means you'll need to handle it separately for backup/deployment
+*.sqlite3
+
+# Environment variables
+.env # Generally, you DO NOT want to commit this to public repos!
