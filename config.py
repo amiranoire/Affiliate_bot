@@ -6,7 +6,8 @@ class Config:
     """Centralized configuration management with validation"""
     
     def __init__(self):
-        load_dotenv()  # Load from .env file
+        # Load environment variables from .env file
+        load_dotenv()
         
         # Core bot configuration
         self.TOKEN: str = self._get_env_var("TELEGRAM_BOT_TOKEN")
