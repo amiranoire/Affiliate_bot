@@ -18,4 +18,6 @@ venv/ # This is the important line for your current issue
 *.sqlite3
 
 # Environment variables
-.env # Generally, you DO NOT want to commit this to public repos!
+.env # Generally, you DO NOT want to commit this to public repos!.env
+.env
+.env
