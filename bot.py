@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import logging
-import sqlite3 # ADDED: Import sqlite3
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
@@ -12,9 +12,9 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from apscheduler.schedulers.background import BackgroundScheduler # ADDED: For scheduling tasks
+from apscheduler.schedulers.background import BackgroundScheduler
 
-from config import config  # Using the enhanced config class
+from config import config
 
 # --- Database Setup ---
 def init_db():
@@ -22,18 +22,18 @@ def init_db():
     with sqlite3.connect(config.DATABASE_NAME) as conn:
         # Messages table with additional tracking fields
         conn.execute('''CREATE TABLE IF NOT EXISTS messages
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, -- Added AUTOINCREMENT for clarity
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
                      user_id INTEGER NOT NULL,
                      username TEXT,
                      full_name TEXT,
                      chat_id INTEGER NOT NULL,
-                     message_id INTEGER NOT NULL UNIQUE, -- message_id is unique per chat, but unique globally if combined with chat_id
+                     message_id INTEGER NOT NULL UNIQUE,
                      text TEXT,
                      timestamp DATETIME NOT NULL,
-                     replied_to_message_id INTEGER DEFAULT NULL, -- Changed from 'replied_to'
+                     replied_to_message_id INTEGER DEFAULT NULL,
                      was_answered BOOLEAN DEFAULT FALSE,
                      is_question BOOLEAN DEFAULT FALSE)''')
-        
+
         # New table to store individual response metrics
         conn.execute('''CREATE TABLE IF NOT EXISTS response_metrics
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +52,7 @@ def init_db():
                      questions_asked INTEGER DEFAULT 0,
                      questions_answered INTEGER DEFAULT 0,
                      PRIMARY KEY (user_id, date))''')
-        
+
         # Unanswered questions tracking
         conn.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions
                      (message_id INTEGER PRIMARY KEY,
@@ -61,8 +61,22 @@ def init_db():
                      question_text TEXT NOT NULL,
                      timestamp DATETIME NOT NULL,
                      reminded BOOLEAN DEFAULT FALSE)''')
+
+        # NEW TABLE: Store employee IDs
+        conn.execute('''CREATE TABLE IF NOT EXISTS employees
+                     (user_id INTEGER PRIMARY KEY,
+                     username TEXT,
+                     full_name TEXT,
+                     added_by TEXT,
+                     added_timestamp DATETIME NOT NULL)''')
+
         conn.commit()
 
+# Helper to check if a user is an employee
+def is_employee(user_id: int) -> bool:
+    with sqlite3.connect(config.DATABASE_NAME) as conn:
+        cursor = conn.execute("SELECT 1 FROM employees WHERE user_id = ?", (user_id,))
+        return cursor.fetchone() is not None
 
 # --- Scheduled Jobs (Placeholder Functions) ---
 async def check_unanswered_questions(context: ContextTypes.DEFAULT_TYPE):
@@ -77,15 +91,12 @@ async def check_unanswered_questions(context: ContextTypes.DEFAULT_TYPE):
                                      WHERE reminded = FALSE
                                      AND (JULIANDAY(?) - JULIANDAY(timestamp)) * 86400 > ?''',
                                   (now, config.UNANSWERED_ALERT_THRESHOLD))
-            
+
             unanswered_list = cursor.fetchall()
 
             for msg_id, chat_id, user_id, question_text, timestamp_str in unanswered_list:
                 # Convert timestamp_str back to datetime object for calculation if needed, or just for display
-                question_timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f') # Adjust format if needed
-                
-                # Fetch user details (optional, but good for clear reminders)
-                # You might need to store user names in a separate 'users' table if you want to display full names easily
+                question_timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
                 
                 try:
                     await context.bot.send_message(
@@ -93,7 +104,7 @@ async def check_unanswered_questions(context: ContextTypes.DEFAULT_TYPE):
                         text=f"🚨 Reminder: This question has been unanswered for over {config.UNANSWERED_ALERT_THRESHOLD / 3600:.1f} hours:\n\n"
                              f"Original message (ID: {msg_id}): \"{question_text}\"\n"
                              f"Please provide a response!",
-                        reply_to_message_id=msg_id # Links reminder to original message
+                        reply_to_message_id=msg_id
                     )
                     # Mark as reminded
                     conn.execute("UPDATE unanswered_questions SET reminded = TRUE WHERE message_id = ?", (msg_id,))
@@ -101,7 +112,7 @@ async def check_unanswered_questions(context: ContextTypes.DEFAULT_TYPE):
                     logging.info(f"Sent unanswered reminder for message {msg_id} in chat {chat_id}")
                 except Exception as e:
                     logging.error(f"Failed to send reminder for message {msg_id}: {e}")
-            
+
     except Exception as e:
         logging.error(f"Error in check_unanswered_questions job: {e}")
 
@@ -127,7 +138,7 @@ async def update_employee_activity_summary(context: ContextTypes.DEFAULT_TYPE):
                 SELECT
                     responder_user_id,
                     AVG(response_duration_seconds) AS avg_resp_time,
-                    COUNT(reply_message_id) AS questions_answered -- Assuming each reply is an 'answer'
+                    COUNT(reply_message_id) AS questions_answered
                 FROM response_metrics
                 WHERE DATE(timestamp) = ?
                 GROUP BY responder_user_id
@@ -142,7 +153,7 @@ async def update_employee_activity_summary(context: ContextTypes.DEFAULT_TYPE):
                     'avg_response_time': 0.0,
                     'questions_answered': 0
                 }
-            
+
             for user_id, avg_resp_time, q_answered in response_data:
                 if user_id not in activity_updates:
                     activity_updates[user_id] = {
@@ -157,9 +168,9 @@ async def update_employee_activity_summary(context: ContextTypes.DEFAULT_TYPE):
                     INSERT OR REPLACE INTO employee_activity
                     (user_id, date, message_count, avg_response_time, questions_asked, questions_answered)
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (user_id, today, data['message_count'], data['avg_response_time'], 
+                ''', (user_id, today, data['message_count'], data['avg_response_time'],
                       data['questions_asked'], data['questions_answered']))
-            
+
             conn.commit()
             logging.info(f"Employee activity summary updated for {today}")
 
@@ -173,39 +184,37 @@ async def track_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.message
         user = msg.from_user
-        
-        # Ensure user.username and user.full_name are not None before inserting
+
         username = user.username if user.username else f"id_{user.id}"
         full_name = user.full_name if user.full_name else f"User {user.id}"
 
         with sqlite3.connect(config.DATABASE_NAME) as conn:
             # Store the message
-            conn.execute('''INSERT INTO messages 
-                         (user_id, username, full_name, chat_id, 
-                          message_id, text, timestamp) 
+            conn.execute('''INSERT INTO messages
+                         (user_id, username, full_name, chat_id,
+                          message_id, text, timestamp)
                          VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                      (user.id, username, full_name, # Used cleaned username and full_name
+                      (user.id, username, full_name,
                        msg.chat_id, msg.message_id, msg.text, datetime.now()))
-            
+
             # Check if message is a question (simple keyword check)
-            # You might want a more sophisticated NLP approach for real questions
             is_question = any(q in msg.text.lower() for q in ['?', 'how to', 'help with', 'can i', 'do you know'])
             if is_question:
-                conn.execute('''UPDATE messages SET is_question = TRUE 
+                conn.execute('''UPDATE messages SET is_question = TRUE
                              WHERE message_id = ?''', (msg.message_id,))
-                
+
                 # Track unanswered questions
                 conn.execute('''INSERT INTO unanswered_questions
                              (message_id, chat_id, user_id, question_text, timestamp)
                              VALUES (?, ?, ?, ?, ?)''',
                           (msg.message_id, msg.chat_id, user.id, msg.text, datetime.now()))
-            
+
             # Handle replies
             if msg.reply_to_message:
                 original_msg_id = msg.reply_to_message.message_id
                 original_msg_date = msg.reply_to_message.date
                 response_time_seconds = (msg.date - original_msg_date).total_seconds()
-                
+
                 # Store response metrics
                 conn.execute('''INSERT INTO response_metrics
                              (reply_message_id, original_message_id, responder_user_id,
@@ -215,25 +224,24 @@ async def track_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            response_time_seconds, datetime.now()))
 
                 # Mark original message as answered in the messages table
-                conn.execute('''UPDATE messages SET was_answered = TRUE 
-                             WHERE message_id = ?''', 
-                          (original_msg_id,))
-                
-                # Remove from unanswered_questions table if it was a question and now answered
-                conn.execute('''DELETE FROM unanswered_questions 
+                conn.execute('''UPDATE messages SET was_answered = TRUE
                              WHERE message_id = ?''',
                           (original_msg_id,))
-                
+
+                # Remove from unanswered_questions table if it was a question and now answered
+                conn.execute('''DELETE FROM unanswered_questions
+                             WHERE message_id = ?''',
+                          (original_msg_id,))
+
                 # Alert slow responses (if it was a question and got a slow reply)
-                # Only alert if the original message was a question
                 original_message_is_question = conn.execute("SELECT is_question FROM messages WHERE message_id = ?", (original_msg_id,)).fetchone()
                 if original_message_is_question and original_message_is_question[0] and response_time_seconds > config.RESPONSE_ALERT_THRESHOLD:
                     await notify_slow_response(msg, response_time_seconds)
-            
+
             conn.commit()
-            
+
     except Exception as e:
-        logging.error(f"Tracking error: {e}", exc_info=True) # Added exc_info=True for full traceback
+        logging.error(f"Tracking error: {e}", exc_info=True)
         if config.ADMIN_CHAT_ID:
             try:
                 await context.bot.send_message(
@@ -252,7 +260,7 @@ async def notify_slow_response(message: Message, response_time: float):
             f"⏰ Slow Response Notice\n"
             f"Reply took {hours:.1f} hours\n"
             f"Team target: <{config.RESPONSE_ALERT_THRESHOLD / 3600:.1f}> hours",
-            reply_to_message_id=message.message_id # This links the notification to the *reply* message, not the original question
+            reply_to_message_id=message.message_id
         )
     except Exception as e:
         logging.error(f"Failed to send slow response notification: {e}", exc_info=True)
@@ -270,36 +278,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/stats - Your personal metrics\n"
         "/teamstats - Team overview (managers only)\n"
-        "/unanswered - List pending questions"
+        "/unanswered - List pending questions\n"
+        "/add_employee - Add an employee (admin only)" # Added to start message
     )
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Enhanced employee statistics"""
     try:
         user = update.message.from_user
-        
+
         with sqlite3.connect(config.DATABASE_NAME) as conn:
             # Get basic activity from messages table
             # Calculate total messages by this user, and questions asked by this user
-            stats_messages = conn.execute('''SELECT 
+            stats_messages = conn.execute('''SELECT
                                   COUNT(id) as total_messages,
                                   SUM(CASE WHEN is_question THEN 1 ELSE 0 END) as questions_asked
-                                  FROM messages 
-                                  WHERE user_id = ?''', 
+                                  FROM messages
+                                  WHERE user_id = ?''',
                                (user.id,)).fetchone()
-            
+
             total_messages = stats_messages[0] if stats_messages else 0
             questions_asked = stats_messages[1] if stats_messages else 0
 
             # Get replies sent by this user, and their response times from response_metrics
-            response_stats = conn.execute('''SELECT 
+            response_stats = conn.execute('''SELECT
                                            COUNT(reply_message_id) as replies_sent,
                                            AVG(response_duration_seconds) as avg_response_s,
                                            MAX(response_duration_seconds) as max_response_s
                                            FROM response_metrics
                                            WHERE responder_user_id = ?''',
                                         (user.id,)).fetchone()
-            
+
             replies_sent = response_stats[0] if response_stats else 0
             avg_response_s = response_stats[1] if response_stats and response_stats[1] is not None else 0
             max_response_s = response_stats[2] if response_stats and response_stats[2] is not None else 0
@@ -307,7 +316,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Convert seconds to hours for display
             avg_response_h = avg_response_s / 3600
             max_response_h = max_response_s / 3600
-            
+
             await update.message.reply_text(
                 f"📊 Your Stats\n"
                 f"• Total Messages: {total_messages}\n"
@@ -317,7 +326,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• Longest Response: {max_response_h:.1f}h",
                 parse_mode='Markdown'
             )
-            
+
     except Exception as e:
         logging.error(f"Stats error for user {update.message.from_user.id}: {e}", exc_info=True)
         await update.message.reply_text("🔧 Couldn't fetch your stats. An error occurred.")
@@ -334,9 +343,8 @@ async def teamstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Fetch data from employee_activity table
         with sqlite3.connect(config.DATABASE_NAME) as conn:
             # For simplicity, let's get activity for the last 7 days for all users
-            # This can be made more sophisticated (e.g., query for a specific date range)
             seven_days_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-            
+
             # Aggregate stats for each user over the last 7 days
             team_summary = conn.execute(f'''
                 SELECT
@@ -357,8 +365,6 @@ async def teamstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             response_text = "📊 Team Performance (Last 7 Days):\n\n"
             for user_id, msg_count, avg_resp_s, q_asked, q_answered in team_summary:
-                # You might want to fetch username/full_name from the messages table or a dedicated users table
-                # For now, just use user_id
                 user_info = conn.execute("SELECT username, full_name FROM messages WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
                 user_display_name = user_info[1] if user_info and user_info[1] else f"User {user_id}"
 
@@ -370,7 +376,7 @@ async def teamstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"  - Questions Answered: {q_answered}\n"
                     f"  - Avg. Response: {avg_resp_h:.1f}h\n\n"
                 )
-            
+
             await update.message.reply_text(response_text, parse_mode='Markdown')
 
     except Exception as e:
@@ -382,27 +388,21 @@ async def unanswered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List pending unanswered questions."""
     try:
         with sqlite3.connect(config.DATABASE_NAME) as conn:
-            # Fetch all currently unanswered questions that haven't been reminded yet
-            # Or perhaps all unanswered questions, regardless of reminder status, if user wants to see all
             cursor = conn.execute('''SELECT message_id, chat_id, user_id, question_text, timestamp
                                      FROM unanswered_questions
                                      ORDER BY timestamp ASC''')
-            
+
             unanswered_list = cursor.fetchall()
 
             if not unanswered_list:
                 await update.message.reply_text("🎉 No unanswered questions found! Great job, team!")
                 return
-            
+
             response_text = "📚 Unanswered Questions:\n\n"
             for msg_id, chat_id, user_id, question_text, timestamp_str in unanswered_list:
-                # Fetch original sender's name
                 sender_info = conn.execute("SELECT full_name FROM messages WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
                 sender_name = sender_info[0] if sender_info else f"User {user_id}"
 
-                # Link to message if possible (Telegram links need specific format)
-                # This will only work if the bot is in a supergroup/channel and has "Can send messages" permissions
-                # For private chats, message_id linking might not work directly.
                 chat_link = f"https://t.me/c/{str(chat_id).replace('-100', '')}/{msg_id}" if str(chat_id).startswith('-100') else f"Chat ID: {chat_id}"
 
                 response_text += (
@@ -410,12 +410,81 @@ async def unanswered(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"  Question: \"{question_text}\"\n"
                     f"  Link: {chat_link}\n\n"
                 )
-            
+
             await update.message.reply_text(response_text, parse_mode='Markdown', disable_web_page_preview=True)
 
     except Exception as e:
         logging.error(f"Unanswered questions error: {e}", exc_info=True)
         await update.message.reply_text("🔧 Couldn't fetch unanswered questions. An error occurred.")
+
+
+async def add_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Adds a user as an employee. Only for admins."""
+    # Check if the user is an admin (you!)
+    if update.message.from_user.id != config.ADMIN_CHAT_ID:
+        await update.message.reply_text("🚫 You are not authorized to add employees.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Please provide the user ID or username of the employee to add. E.g., `/add_employee 123456789` or `/add_employee @username`")
+        return
+
+    # Try to parse the input
+    user_identifier = context.args[0]
+    target_user_id = None
+    target_username = None
+
+    try:
+        # If it's a numeric ID
+        target_user_id = int(user_identifier)
+    except ValueError:
+        # If it's a username
+        target_username = user_identifier.lstrip('@')
+        # We need to look up the user ID from the messages table
+        with sqlite3.connect(config.DATABASE_NAME) as conn:
+            cursor = conn.execute("SELECT user_id, full_name FROM messages WHERE username = ? LIMIT 1", (target_username,))
+            result = cursor.fetchone()
+            if result:
+                target_user_id = result[0]
+                target_full_name = result[1]
+            else:
+                await update.message.reply_text(f"Couldn't find a user with username '{target_username}' in my message history. Please try with their numeric user ID or ensure they've sent a message to the bot recently.")
+                return
+
+    if not target_user_id:
+        await update.message.reply_text("Invalid user identifier provided.")
+        return
+
+    # If user ID was provided directly, we try to fetch full_name from history
+    if not target_username: # means user_identifier was a numeric ID
+        with sqlite3.connect(config.DATABASE_NAME) as conn:
+            cursor = conn.execute("SELECT username, full_name FROM messages WHERE user_id = ? LIMIT 1", (target_user_id,))
+            result = cursor.fetchone()
+            if result:
+                target_username = result[0]
+                target_full_name = result[1]
+            else:
+                target_username = f"id_{target_user_id}" # Fallback
+                target_full_name = f"User {target_user_id}" # Fallback
+
+    try:
+        with sqlite3.connect(config.DATABASE_NAME) as conn:
+            conn.execute('''INSERT OR IGNORE INTO employees (user_id, username, full_name, added_by, added_timestamp)
+                         VALUES (?, ?, ?, ?, ?)''',
+                      (target_user_id, target_username, target_full_name,
+                       update.message.from_user.full_name, datetime.now()))
+            conn.commit()
+
+        # Check if row was actually inserted (not IGNOREd)
+        if conn.changes > 0:
+            await update.message.reply_text(f"✅ Employee {target_full_name} (ID: `{target_user_id}`) has been added.", parse_mode='Markdown')
+            logging.info(f"Admin {update.message.from_user.id} added employee {target_user_id}.")
+        else:
+            await update.message.reply_text(f"Employee {target_full_name} (ID: `{target_user_id}`) is already in the list.")
+
+    except Exception as e:
+        logging.error(f"Error adding employee {target_user_id}: {e}", exc_info=True)
+        await update.message.reply_text(f"🔧 An error occurred while trying to add the employee.")
 
 
 # --- Main Application ---
@@ -427,26 +496,27 @@ def main():
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    logging.getLogger('apscheduler').setLevel(logging.DEBUG) # Optional: more detailed logs for scheduler
+    logging.getLogger('apscheduler').setLevel(logging.DEBUG)
 
     # Create bot
     application = Application.builder().token(config.TOKEN).build()
-    
+
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("teamstats", teamstats)) # ADDED
-    application.add_handler(CommandHandler("unanswered", unanswered)) # ADDED
+    application.add_handler(CommandHandler("teamstats", teamstats))
+    application.add_handler(CommandHandler("unanswered", unanswered))
+    application.add_handler(CommandHandler("add_employee", add_employee)) # ADDED: New command handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_message))
 
     # Setup APScheduler
     scheduler = BackgroundScheduler()
     # Schedule the daily activity summary update
-    scheduler.add_job(update_employee_activity_summary, 'interval', hours=24, args=[application]) # Runs every 24 hours
+    scheduler.add_job(update_employee_activity_summary, 'interval', hours=24, args=[application])
     # Schedule the unanswered questions check (e.g., every hour)
-    scheduler.add_job(check_unanswered_questions, 'interval', hours=1, args=[application]) # Runs every hour
+    scheduler.add_job(check_unanswered_questions, 'interval', hours=1, args=[application])
 
-    scheduler.start() # Start the scheduler
+    scheduler.start()
 
     # Start polling
     logging.info("Bot is starting polling...")
