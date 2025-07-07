@@ -418,75 +418,73 @@ async def unanswered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔧 Couldn't fetch unanswered questions. An error occurred.")
 
 
-async def add_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Adds a user as an employee. Only for admins."""
-    # Check if the user is an admin (you!)
-    if update.message.from_user.id != config.ADMIN_CHAT_ID:
-        await update.message.reply_text("🚫 You are not authorized to add employees.")
-        return
-
+@is_admin
+@run_async
+async def add_employee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Adds an employee (affiliate manager) to the database."""
     if not context.args:
-        await update.message.reply_text("Please provide the user ID or username of the employee to add. E.g., `/add_employee 123456789` or `/add_employee @username`")
+        await update.message.reply_text("Please provide the employee's user ID or username. Example: `/add_employee 123456789` or `/add_employee @username`")
         return
 
-    # Try to parse the input
-    user_identifier = context.args[0]
+    target_id_str = context.args[0]
     target_user_id = None
     target_username = None
+    target_full_name = "Unknown"
 
-    try:
-        # If it's a numeric ID
-        target_user_id = int(user_identifier)
-    except ValueError:
-        # If it's a username
-        target_username = user_identifier.lstrip('@')
-        # We need to look up the user ID from the messages table
+    if target_id_str.startswith('@'):
+        # Try to find user_id from username in message history
+        target_username = target_id_str[1:]
         with sqlite3.connect(config.DATABASE_NAME) as conn:
-            cursor = conn.execute("SELECT user_id, full_name FROM messages WHERE username = ? LIMIT 1", (target_username,))
+            cursor = conn.execute("SELECT user_id, full_name FROM messages WHERE username = ? ORDER BY timestamp DESC LIMIT 1", (target_username,))
             result = cursor.fetchone()
             if result:
-                target_user_id = result[0]
-                target_full_name = result[1]
+                target_user_id, target_full_name = result
             else:
-                await update.message.reply_text(f"Couldn't find a user with username '{target_username}' in my message history. Please try with their numeric user ID or ensure they've sent a message to the bot recently.")
+                await update.message.reply_text(f"Couldn't find a user with username '{target_id_str}' in my message history. Please try with their numeric user ID or ensure they've sent a message to the bot recently.")
                 return
+    else:
+        try:
+            target_user_id = int(target_id_str)
+            # Try to get full_name and username from message history if available
+            with sqlite3.connect(config.DATABASE_NAME) as conn:
+                cursor = conn.execute("SELECT username, full_name FROM messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (target_user_id,))
+                result = cursor.fetchone()
+                if result:
+                    target_username, target_full_name = result
+                else:
+                    target_full_name = f"User {target_user_id}" # Fallback if no history
+        except ValueError:
+            await update.message.reply_text("Invalid user ID. Please provide a numeric user ID or a valid username (e.g., `/add_employee 123456789` or `/add_employee @username`).")
+            return
 
-    if not target_user_id:
-        await update.message.reply_text("Invalid user identifier provided.")
+    if target_user_id is None:
+        await update.message.reply_text("Could not determine a valid user ID for the provided input.")
         return
 
-    # If user ID was provided directly, we try to fetch full_name from history
-    if not target_username: # means user_identifier was a numeric ID
-        with sqlite3.connect(config.DATABASE_NAME) as conn:
-            cursor = conn.execute("SELECT username, full_name FROM messages WHERE user_id = ? LIMIT 1", (target_user_id,))
-            result = cursor.fetchone()
-            if result:
-                target_username = result[0]
-                target_full_name = result[1]
-            else:
-                target_username = f"id_{target_user_id}" # Fallback
-                target_full_name = f"User {target_user_id}" # Fallback
-
     try:
         with sqlite3.connect(config.DATABASE_NAME) as conn:
-            conn.execute('''INSERT OR IGNORE INTO employees (user_id, username, full_name, added_by, added_timestamp)
-                         VALUES (?, ?, ?, ?, ?)''',
-                      (target_user_id, target_username, target_full_name,
-                       update.message.from_user.full_name, datetime.now()))
+            cursor = conn.cursor() # Explicitly get a cursor
+            cursor.execute('''INSERT OR IGNORE INTO employees
+                              (user_id, username, full_name, added_by, added_timestamp)
+                              VALUES (?, ?, ?, ?, ?)''',
+                           (target_user_id, target_username, target_full_name,
+                            f"{update.message.from_user.full_name} ({update.message.from_user.id})",
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")))
             conn.commit()
 
-        # Check if row was actually inserted (not IGNOREd)
-        if conn.changes > 0:
-            await update.message.reply_text(f"✅ Employee {target_full_name} (ID: `{target_user_id}`) has been added.", parse_mode='Markdown')
-            logging.info(f"Admin {update.message.from_user.id} added employee {target_user_id}.")
-        else:
-            await update.message.reply_text(f"Employee {target_full_name} (ID: `{target_user_id}`) is already in the list.")
+            # CORRECTED LINE: Use cursor.rowcount to check affected rows
+            if cursor.rowcount > 0:
+                logging.info(f"Admin {update.message.from_user.id} added employee {target_user_id}.")
+                await update.message.reply_text(f"✅ Employee '{target_full_name}' (ID: {target_user_id}) has been added.")
+            else:
+                logging.info(f"Admin {update.message.from_user.id} tried to add existing employee {target_user_id}.")
+                await update.message.reply_text(f"Employee '{target_full_name}' (ID: {target_user_id}) is already in the list.")
 
     except Exception as e:
         logging.error(f"Error adding employee {target_user_id}: {e}", exc_info=True)
-        await update.message.reply_text(f"🔧 An error occurred while trying to add the employee.")
+        await update.message.reply_text("An error occurred while trying to add the employee.")
 
-
+        
 # --- Main Application ---
 def main():
     """Start the enhanced bot"""

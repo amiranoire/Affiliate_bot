@@ -1,0 +1,27 @@
+[Unit]
+Description=Telegram Employee Communication Bot
+After=network.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/telegram-bot
+Environment=PATH=/opt/telegram-bot/venv/bin
+ExecStart=/opt/telegram-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-bot
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/telegram-bot
+
+[Install]
+WantedBy=multi-user.target

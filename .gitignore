@@ -21,3 +21,5 @@ venv/ # This is the important line for your current issue
 .env # Generally, you DO NOT want to commit this to public repos!.env
 .env
 .env
+venv/
+venv/
