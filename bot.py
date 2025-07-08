@@ -14,7 +14,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import config
 
@@ -913,7 +913,8 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_message))
 
     # Configure scheduler (using AsyncIOScheduler for better compatibility)
-    scheduler = AsyncIOScheduler()
+    scheduler = BackgroundScheduler()
+
     
     # Schedule jobs
     scheduler.add_job(
