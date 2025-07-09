@@ -53,7 +53,8 @@ def init_db():
                      timestamp DATETIME NOT NULL,
                      replied_to_message_id INTEGER DEFAULT NULL,
                      was_answered BOOLEAN DEFAULT FALSE,
-                     is_question BOOLEAN DEFAULT FALSE,
+                     is_partner_message BOOLEAN DEFAULT FALSE,
+                     turn_id INTEGER DEFAULT NULL,
                      UNIQUE(chat_id, message_id))''')
 
         # Table to store individual response metrics
@@ -74,11 +75,11 @@ def init_db():
                      date DATE NOT NULL,
                      message_count INTEGER DEFAULT 0,
                      avg_response_time REAL DEFAULT 0.0,
-                     questions_asked INTEGER DEFAULT 0,
-                     questions_answered INTEGER DEFAULT 0,
+                     partner_turns_initiated INTEGER DEFAULT 0,
+                     partner_turns_answered INTEGER DEFAULT 0,
                      PRIMARY KEY (user_id, date))''')
 
-        # Unanswered questions tracking for PARTNER turns
+        # Partner conversation turns tracking
         conn.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions
                      (turn_id INTEGER PRIMARY KEY AUTOINCREMENT,
                      chat_id INTEGER NOT NULL,
@@ -138,7 +139,7 @@ async def check_unanswered_questions(context: ContextTypes.DEFAULT_TYPE):
                 FROM unanswered_questions
                 WHERE reminded = FALSE
                 AND (JULIANDAY(?) - JULIANDAY(last_message_timestamp)) * 86400 > ?
-            ''', (now, config.EMPLOYEE_RESPONSE_THRESHOLD_SECONDS))
+            ''', (now, config.UNANSWERED_ALERT_THRESHOLD))
 
             unanswered_turns = cursor.fetchall()
 
@@ -167,9 +168,9 @@ async def check_unanswered_questions(context: ContextTypes.DEFAULT_TYPE):
                     
                     await context.bot.send_message(
                         chat_id=config.ADMIN_CHAT_ID,
-                        text=f"🚨 **Unanswered Partner Message**\n\n"
+                        text=f"🚨 **Unanswered Partner Turn**\n\n"
                              f"**From:** {partner_display_name} (ID: {partner_user_id})\n"
-                             f"**Message:** \"{display_text}\"\n"
+                             f"**Last Message:** \"{display_text}\"\n"
                              f"**Unanswered for:** {hours_since_last_message:.1f} hours\n"
                              f"**Link:** {chat_link}",
                         parse_mode='Markdown',
@@ -198,55 +199,84 @@ async def update_employee_activity_summary(context: ContextTypes.DEFAULT_TYPE):
     
     try:
         with sqlite3.connect(config.DATABASE_NAME) as conn:
-            # Get message counts and questions asked
+            # Get message counts for employees
             messages_data = conn.execute('''
                 SELECT
                     user_id,
-                    COUNT(id) AS message_count,
-                    SUM(CASE WHEN is_question THEN 1 ELSE 0 END) AS questions_asked
+                    COUNT(id) AS message_count
                 FROM messages
                 WHERE DATE(timestamp) = ? AND user_id IN (SELECT user_id FROM employees)
                 GROUP BY user_id
             ''', (today,)).fetchall()
 
-            # Get response metrics
-            response_data = conn.execute('''
+            # Get partner turns answered by employees (responses to partners)
+            partner_turns_answered = conn.execute('''
                 SELECT
                     responder_user_id,
-                    AVG(response_duration_seconds) AS avg_resp_time,
-                    COUNT(reply_message_id) AS questions_answered
+                    COUNT(reply_message_id) AS turns_answered
                 FROM response_metrics
-                WHERE DATE(timestamp) = ? AND responder_user_id IN (SELECT user_id FROM employees)
+                WHERE DATE(timestamp) = ? 
+                AND responder_user_id IN (SELECT user_id FROM employees)
+                AND original_sender_user_id NOT IN (SELECT user_id FROM employees)
                 GROUP BY responder_user_id
             ''', (today,)).fetchall()
 
+            # Get average response times for employees
+            response_times = conn.execute('''
+                SELECT
+                    responder_user_id,
+                    AVG(response_duration_seconds) AS avg_resp_time
+                FROM response_metrics
+                WHERE DATE(timestamp) = ? 
+                AND responder_user_id IN (SELECT user_id FROM employees)
+                GROUP BY responder_user_id
+            ''', (today,)).fetchall()
+
+            # Count partner turns that were initiated today (for context)
+            partner_turns_today = conn.execute('''
+                SELECT COUNT(turn_id) FROM unanswered_questions
+                WHERE DATE(turn_start_timestamp) = ?
+            ''', (today,)).fetchone()[0]
+
             # Consolidate data
             activity_updates = {}
-            for user_id, msg_count, q_asked in messages_data:
+            
+            # Initialize with message counts
+            for user_id, msg_count in messages_data:
                 activity_updates[user_id] = {
                     'message_count': msg_count,
-                    'questions_asked': q_asked,
                     'avg_response_time': 0.0,
-                    'questions_answered': 0
+                    'partner_turns_initiated': 0,  # Employees don't initiate partner turns
+                    'partner_turns_answered': 0
                 }
 
-            for user_id, avg_resp_time, q_answered in response_data:
+            # Add partner turns answered
+            for user_id, turns_answered in partner_turns_answered:
                 if user_id not in activity_updates:
-                    activity_updates[user_id] = {'message_count': 0, 'questions_asked': 0}
-                activity_updates[user_id]['avg_response_time'] = avg_resp_time if avg_resp_time is not None else 0.0
-                activity_updates[user_id]['questions_answered'] = q_answered
+                    activity_updates[user_id] = {
+                        'message_count': 0,
+                        'avg_response_time': 0.0,
+                        'partner_turns_initiated': 0,
+                        'partner_turns_answered': 0
+                    }
+                activity_updates[user_id]['partner_turns_answered'] = turns_answered
+
+            # Add response times
+            for user_id, avg_resp_time in response_times:
+                if user_id in activity_updates:
+                    activity_updates[user_id]['avg_response_time'] = avg_resp_time if avg_resp_time is not None else 0.0
 
             # Update database
             for user_id, data in activity_updates.items():
                 conn.execute('''
                     INSERT OR REPLACE INTO employee_activity
-                    (user_id, date, message_count, avg_response_time, questions_asked, questions_answered)
+                    (user_id, date, message_count, avg_response_time, partner_turns_initiated, partner_turns_answered)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (user_id, today, data['message_count'], data['avg_response_time'],
-                      data['questions_asked'], data['questions_answered']))
+                      data['partner_turns_initiated'], data['partner_turns_answered']))
 
             conn.commit()
-            logging.info(f"Employee activity summary updated for {today}")
+            logging.info(f"Employee activity summary updated for {today}. Partner turns today: {partner_turns_today}")
 
     except Exception as e:
         logging.error(f"Error in update_employee_activity_summary job: {e}")
@@ -265,24 +295,27 @@ async def track_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         full_name = user.full_name if user.full_name else f"User {user.id}"
 
         with sqlite3.connect(config.DATABASE_NAME) as conn:
-            # Store the message (with conflict handling)
+            sender_is_employee = is_employee(user.id)
+            is_partner_message = not sender_is_employee
+            
+            # Handle partner messages (create/update conversation turns)
+            turn_id = None
+            if is_partner_message:
+                turn_id = await handle_partner_message(conn, msg, user)
+
+            # Store the message with turn association
             try:
                 conn.execute('''INSERT INTO messages
                              (user_id, username, full_name, chat_id,
-                              message_id, text, timestamp, replied_to_message_id)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                              message_id, text, timestamp, replied_to_message_id, is_partner_message, turn_id)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                           (user.id, username, full_name, msg.chat_id, 
                            msg.message_id, msg.text, datetime.now(),
-                           msg.reply_to_message.message_id if msg.reply_to_message else None))
+                           msg.reply_to_message.message_id if msg.reply_to_message else None,
+                           is_partner_message, turn_id))
             except sqlite3.IntegrityError:
                 # Message already exists, skip processing
                 return
-
-            sender_is_employee = is_employee(user.id)
-
-            # Handle partner messages (create/update unanswered turns)
-            if not sender_is_employee:
-                await handle_partner_message(conn, msg, user)
 
             # Handle employee replies (mark partner turns as answered)
             if sender_is_employee and msg.reply_to_message:
@@ -291,12 +324,6 @@ async def track_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Track response metrics for all replies
             if msg.reply_to_message:
                 await track_response_metrics(conn, msg, user)
-
-            # Mark questions
-            is_question = any(q in msg.text.lower() for q in ['?', 'how to', 'help with', 'can i', 'do you know'])
-            if is_question:
-                conn.execute('UPDATE messages SET is_question = TRUE WHERE chat_id = ? AND message_id = ?', 
-                           (msg.chat_id, msg.message_id))
 
             conn.commit()
 
@@ -312,7 +339,7 @@ async def track_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logging.error(f"Failed to send admin error notification: {admin_e}")
 
 async def handle_partner_message(conn, msg, user):
-    """Handle messages from partners (non-employees)."""
+    """Handle messages from partners (non-employees) and manage conversation turns."""
     try:
         # Check for existing unanswered turn
         cursor = conn.execute('''SELECT turn_id, last_message_timestamp
@@ -328,7 +355,7 @@ async def handle_partner_message(conn, msg, user):
             last_msg_timestamp = datetime.strptime(last_msg_timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
             
             # Check if within conversation turn timeout
-            if (current_time - last_msg_timestamp).total_seconds() < config.CONVERSATION_TURN_TIMEOUT_SECONDS:
+            if (current_time - last_msg_timestamp).total_seconds() < config.CONVERSATION_TURN_TIMEOUT:
                 # Update existing turn
                 conn.execute('''UPDATE unanswered_questions
                                  SET last_partner_message_id = ?,
@@ -338,28 +365,25 @@ async def handle_partner_message(conn, msg, user):
                                  WHERE turn_id = ?''',
                               (msg.message_id, msg.text, current_time, turn_id))
                 logging.info(f"Updated existing partner turn {turn_id} for user {user.id}")
+                return turn_id
             else:
                 # Replace old turn with new one
                 conn.execute('DELETE FROM unanswered_questions WHERE turn_id = ?', (turn_id,))
-                conn.execute('''INSERT INTO unanswered_questions
-                             (chat_id, partner_user_id, last_partner_message_id,
-                              last_partner_message_text, turn_start_timestamp, last_message_timestamp)
-                             VALUES (?, ?, ?, ?, ?, ?)''',
-                          (msg.chat_id, user.id, msg.message_id,
-                           msg.text, current_time, current_time))
-                logging.info(f"Created new partner turn for user {user.id} (old turn expired)")
-        else:
-            # Create new turn
-            conn.execute('''INSERT INTO unanswered_questions
-                         (chat_id, partner_user_id, last_partner_message_id,
-                          last_partner_message_text, turn_start_timestamp, last_message_timestamp)
-                         VALUES (?, ?, ?, ?, ?, ?)''',
-                      (msg.chat_id, user.id, msg.message_id,
-                       msg.text, current_time, current_time))
-            logging.info(f"Created new partner turn for user {user.id}")
+                
+        # Create new turn
+        cursor = conn.execute('''INSERT INTO unanswered_questions
+                     (chat_id, partner_user_id, last_partner_message_id,
+                      last_partner_message_text, turn_start_timestamp, last_message_timestamp)
+                     VALUES (?, ?, ?, ?, ?, ?) RETURNING turn_id''',
+                  (msg.chat_id, user.id, msg.message_id,
+                   msg.text, current_time, current_time))
+        new_turn_id = cursor.fetchone()[0]
+        logging.info(f"Created new partner turn {new_turn_id} for user {user.id}")
+        return new_turn_id
             
     except Exception as e:
         logging.error(f"Error handling partner message: {e}")
+        return None
 
 async def handle_employee_reply(conn, msg, user):
     """Handle replies from employees to mark partner turns as answered."""
@@ -445,11 +469,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome message with available commands."""
     await update.message.reply_text(
         "👔 **Employee Communication Tracker**\n\n"
-        "I monitor team communication and response times.\n\n"
+        "I monitor team communication and partner response times.\n\n"
         "**Available Commands:**\n"
         "• `/stats` - Your personal metrics\n"
         "• `/teamstats` - Team overview (admin only)\n"
-        "• `/unanswered` - List pending partner messages\n"
+        "• `/unanswered` - List pending partner turns\n"
         "• `/add_employee <user_id>` - Add employee (admin only)\n"
         "• `/employee_activity <id> <start> <end>` - Activity report (admin only)\n"
         "• `/help` - Show this help message",
@@ -464,20 +488,21 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show personal statistics."""
     try:
         user = update.message.from_user
+        sender_is_employee = is_employee(user.id)
 
         with sqlite3.connect(config.DATABASE_NAME) as conn:
             # Get message statistics
             stats_messages = conn.execute('''SELECT
                                   COUNT(id) as total_messages,
-                                  SUM(CASE WHEN is_question THEN 1 ELSE 0 END) as questions_asked
+                                  SUM(CASE WHEN is_partner_message THEN 1 ELSE 0 END) as partner_messages
                                   FROM messages
                                   WHERE user_id = ?''',
                                (user.id,)).fetchone()
 
             total_messages = stats_messages[0] if stats_messages else 0
-            questions_asked = stats_messages[1] if stats_messages else 0
+            partner_messages = stats_messages[1] if stats_messages else 0
 
-            # Get response statistics
+            # Get response statistics (for employees)
             response_stats = conn.execute('''SELECT
                                            COUNT(reply_message_id) as replies_sent,
                                            AVG(response_duration_seconds) as avg_response_s,
@@ -493,19 +518,44 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             avg_response_h = avg_response_s / 3600
             max_response_h = max_response_s / 3600
 
-            # Check if user is employee
-            employee_status = "✅ Employee" if is_employee(user.id) else "👤 Partner"
-
-            await update.message.reply_text(
-                f"📊 **Your Statistics**\n\n"
-                f"**Status:** {employee_status}\n"
-                f"**Messages Sent:** {total_messages}\n"
-                f"**Questions Asked:** {questions_asked}\n"
-                f"**Replies Sent:** {replies_sent}\n"
-                f"**Avg Response Time:** {avg_response_h:.1f}h\n"
-                f"**Longest Response:** {max_response_h:.1f}h",
-                parse_mode='Markdown'
-            )
+            # Get partner turn statistics
+            if not sender_is_employee:
+                # For partners - show turns initiated
+                partner_turns = conn.execute('''SELECT COUNT(turn_id) FROM unanswered_questions
+                                              WHERE partner_user_id = ?''', (user.id,)).fetchone()[0]
+                
+                # Check if user is employee
+                employee_status = "👤 Partner"
+                
+                await update.message.reply_text(
+                    f"📊 **Your Statistics**\n\n"
+                    f"**Status:** {employee_status}\n"
+                    f"**Messages Sent:** {total_messages}\n"
+                    f"**Conversation Turns:** {partner_turns}\n"
+                    f"**Replies Sent:** {replies_sent}\n"
+                    f"**Avg Response Time:** {avg_response_h:.1f}h\n"
+                    f"**Longest Response:** {max_response_h:.1f}h",
+                    parse_mode='Markdown'
+                )
+            else:
+                # For employees - show turns answered
+                partner_turns_answered = conn.execute('''SELECT COUNT(reply_message_id) FROM response_metrics
+                                                       WHERE responder_user_id = ? 
+                                                       AND original_sender_user_id NOT IN (SELECT user_id FROM employees)''',
+                                                    (user.id,)).fetchone()[0]
+                
+                employee_status = "✅ Employee"
+                
+                await update.message.reply_text(
+                    f"📊 **Your Statistics**\n\n"
+                    f"**Status:** {employee_status}\n"
+                    f"**Messages Sent:** {total_messages}\n"
+                    f"**Partner Turns Answered:** {partner_turns_answered}\n"
+                    f"**Total Replies:** {replies_sent}\n"
+                    f"**Avg Response Time:** {avg_response_h:.1f}h\n"
+                    f"**Longest Response:** {max_response_h:.1f}h",
+                    parse_mode='Markdown'
+                )
 
     except Exception as e:
         logging.error(f"Stats error for user {update.message.from_user.id}: {e}")
@@ -523,8 +573,7 @@ async def teamstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ea.user_id,
                     COALESCE(SUM(ea.message_count), 0) AS total_messages,
                     COALESCE(AVG(ea.avg_response_time), 0) AS average_response_time,
-                    COALESCE(SUM(ea.questions_asked), 0) AS total_questions_asked,
-                    COALESCE(SUM(ea.questions_answered), 0) AS total_questions_answered,
+                    COALESCE(SUM(ea.partner_turns_answered), 0) AS total_turns_answered,
                     e.full_name,
                     e.username
                 FROM employees e
@@ -538,15 +587,14 @@ async def teamstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             response_text = "📊 **Team Performance (Last 7 Days)**\n\n"
-            for user_id, msg_count, avg_resp_s, q_asked, q_answered, full_name, username in team_summary:
+            for user_id, msg_count, avg_resp_s, turns_answered, full_name, username in team_summary:
                 user_display_name = full_name or username or f"Employee {user_id}"
                 avg_resp_h = (avg_resp_s / 3600) if avg_resp_s else 0.0
                 
                 response_text += (
                     f"**{user_display_name}** (ID: {user_id})\n"
                     f"• Messages: {msg_count}\n"
-                    f"• Questions Asked: {q_asked}\n"
-                    f"• Questions Answered: {q_answered}\n"
+                    f"• Partner Turns Answered: {turns_answered}\n"
                     f"• Avg Response: {avg_resp_h:.1f}h\n\n"
                 )
 
@@ -557,7 +605,7 @@ async def teamstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔧 Error fetching team statistics.")
 
 async def unanswered(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List pending unanswered partner messages."""
+    """List pending unanswered partner turns."""
     try:
         with sqlite3.connect(config.DATABASE_NAME) as conn:
             now = datetime.now()
@@ -568,17 +616,17 @@ async def unanswered(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 FROM unanswered_questions
                 WHERE (JULIANDAY(?) - JULIANDAY(last_message_timestamp)) * 86400 > ?
                 ORDER BY last_message_timestamp ASC
-            ''', (now, config.EMPLOYEE_RESPONSE_THRESHOLD_SECONDS))
+            ''', (now, config.UNANSWERED_ALERT_THRESHOLD))
 
             unanswered_turns = cursor.fetchall()
 
             if not unanswered_turns:
                 await update.message.reply_text(
-                    "🎉 No partner messages are currently unanswered past the threshold!"
+                    "🎉 No partner turns are currently unanswered past the threshold!"
                 )
                 return
 
-            response_text = "📚 **Unanswered Partner Messages**\n\n"
+            response_text = "📚 **Unanswered Partner Turns**\n\n"
             for turn_id, chat_id, partner_user_id, last_msg_id, last_msg_text, last_msg_timestamp_str in unanswered_turns:
                 partner_info = conn.execute(
                     "SELECT username, full_name FROM messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", 
@@ -595,7 +643,7 @@ async def unanswered(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 response_text += (
                     f"**{partner_name}** (ID: {partner_user_id})\n"
-                    f"• Message: \"{display_text}\"\n"
+                    f"• Last Message: \"{display_text}\"\n"
                     f"• Waiting: {hours_since:.1f}h\n"
                     f"• Chat: {chat_id}\n\n"
                 )
@@ -604,7 +652,7 @@ async def unanswered(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logging.error(f"Unanswered questions error: {e}")
-        await update.message.reply_text("🔧 Error fetching unanswered questions.")
+        await update.message.reply_text("🔧 Error fetching unanswered turns.")
 
 @is_admin
 async def add_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -759,8 +807,8 @@ async def employee_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             avg_response_h = (avg_response_s / 3600) if avg_response_s is not None else 0.0
             max_response_h = (max_response_s / 3600) if max_response_s is not None else 0.0
 
-            # Get partner reply metrics
-            partner_replies = conn.execute('''
+            # Get partner turn replies
+            partner_turns_answered = conn.execute('''
                 SELECT COUNT(reply_message_id) FROM response_metrics
                 WHERE responder_user_id = ? AND DATE(timestamp) BETWEEN ? AND ?
                 AND original_sender_user_id NOT IN (SELECT user_id FROM employees)
@@ -771,7 +819,7 @@ async def employee_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📅 **Period:** {start_date_str} to {end_date_str}\n\n"
                 f"• **Total Messages:** {total_messages}\n"
                 f"• **Total Replies:** {total_replies}\n"
-                f"• **Replies to Partners:** {partner_replies}\n"
+                f"• **Partner Turns Answered:** {partner_turns_answered}\n"
                 f"• **Avg Response Time:** {avg_response_h:.1f}h\n"
                 f"• **Max Response Time:** {max_response_h:.1f}h"
             )
@@ -912,9 +960,8 @@ def main():
     # Add message handler for tracking
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, track_message))
 
-    # Configure scheduler (using AsyncIOScheduler for better compatibility)
+    # Configure scheduler
     scheduler = BackgroundScheduler()
-
     
     # Schedule jobs
     scheduler.add_job(
